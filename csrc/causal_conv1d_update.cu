@@ -1,13 +1,13 @@
 /******************************************************************************
  * Copyright (c) 2023, Tri Dao.
  ******************************************************************************/
+#include <hip/hip_runtime.h>
 
 #include <c10/util/BFloat16.h>
 #include <c10/util/Half.h>
-#include <c10/cuda/CUDAException.h>  // For C10_CUDA_CHECK and C10_CUDA_KERNEL_LAUNCH_CHECK
+#include <c10/hip/HIPException.h>  // For C10_HIP_CHECK and C10_HIP_KERNEL_LAUNCH_CHECK
 
-#include <cub/block/block_load.cuh>
-#include <cub/block/block_store.cuh>
+#include <hipcub/hipcub.hpp>
 
 #include "causal_conv1d.h"
 #include "causal_conv1d_common.h"
@@ -66,16 +66,16 @@ void causal_conv1d_update_kernel(ConvParamsBase params) {
 }
 
 template<int kNThreads, int kWidth, typename input_t, typename weight_t>
-void causal_conv1d_update_launch(ConvParamsBase &params, cudaStream_t stream) {
+void causal_conv1d_update_launch(ConvParamsBase &params, hipStream_t stream) {
     using Ktraits = Causal_conv1d_update_kernel_traits<kNThreads, kWidth, input_t, weight_t>;
     dim3 grid(params.batch, (params.dim + kNThreads - 1) / kNThreads);
     auto kernel = &causal_conv1d_update_kernel<Ktraits>;
     kernel<<<grid, Ktraits::kNThreads, 0, stream>>>(params);
-    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    C10_HIP_KERNEL_LAUNCH_CHECK();
 }
 
 template<typename input_t, typename weight_t>
-void causal_conv1d_update_cuda(ConvParamsBase &params, cudaStream_t stream) {
+void causal_conv1d_update_cuda(ConvParamsBase &params, hipStream_t stream) {
     if (params.width == 2) {
         causal_conv1d_update_launch<64, 2, input_t, weight_t>(params, stream);
     } else if (params.width == 3) {
@@ -85,12 +85,12 @@ void causal_conv1d_update_cuda(ConvParamsBase &params, cudaStream_t stream) {
     }
 }
 
-template void causal_conv1d_update_cuda<float, float>(ConvParamsBase &params, cudaStream_t stream);
-template void causal_conv1d_update_cuda<at::Half, float>(ConvParamsBase &params, cudaStream_t stream);
-template void causal_conv1d_update_cuda<at::BFloat16, float>(ConvParamsBase &params, cudaStream_t stream);
-template void causal_conv1d_update_cuda<float, at::Half>(ConvParamsBase &params, cudaStream_t stream);
-template void causal_conv1d_update_cuda<at::Half, at::Half>(ConvParamsBase &params, cudaStream_t stream);
-template void causal_conv1d_update_cuda<at::BFloat16, at::Half>(ConvParamsBase &params, cudaStream_t stream);
-template void causal_conv1d_update_cuda<float, at::BFloat16>(ConvParamsBase &params, cudaStream_t stream);
-template void causal_conv1d_update_cuda<at::Half, at::BFloat16>(ConvParamsBase &params, cudaStream_t stream);
-template void causal_conv1d_update_cuda<at::BFloat16, at::BFloat16>(ConvParamsBase &params, cudaStream_t stream);
+template void causal_conv1d_update_cuda<float, float>(ConvParamsBase &params, hipStream_t stream);
+template void causal_conv1d_update_cuda<at::Half, float>(ConvParamsBase &params, hipStream_t stream);
+template void causal_conv1d_update_cuda<at::BFloat16, float>(ConvParamsBase &params, hipStream_t stream);
+template void causal_conv1d_update_cuda<float, at::Half>(ConvParamsBase &params, hipStream_t stream);
+template void causal_conv1d_update_cuda<at::Half, at::Half>(ConvParamsBase &params, hipStream_t stream);
+template void causal_conv1d_update_cuda<at::BFloat16, at::Half>(ConvParamsBase &params, hipStream_t stream);
+template void causal_conv1d_update_cuda<float, at::BFloat16>(ConvParamsBase &params, hipStream_t stream);
+template void causal_conv1d_update_cuda<at::Half, at::BFloat16>(ConvParamsBase &params, hipStream_t stream);
+template void causal_conv1d_update_cuda<at::BFloat16, at::BFloat16>(ConvParamsBase &params, hipStream_t stream);

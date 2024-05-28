@@ -1,9 +1,10 @@
 /******************************************************************************
  * Copyright (c) 2024, Tri Dao.
  ******************************************************************************/
+#include <hip/hip_runtime.h>
 
-#include <ATen/cuda/CUDAContext.h>
-#include <c10/cuda/CUDAGuard.h>
+#include <ATen/hip/HIPContext.h>
+#include <c10/hip/HIPGuard.h>
 #include <torch/extension.h>
 #include <vector>
 
@@ -40,17 +41,17 @@
     }
 
 template<typename input_t, typename weight_t>
-void causal_conv1d_fwd_cuda(ConvParamsBase &params, cudaStream_t stream);
+void causal_conv1d_fwd_cuda(ConvParamsBase &params, hipStream_t stream);
 template <typename input_t, typename weight_t>
-void causal_conv1d_channellast_fwd_cuda(ConvParamsBase &params, cudaStream_t stream);
+void causal_conv1d_channellast_fwd_cuda(ConvParamsBase &params, hipStream_t stream);
 
 template<typename input_t, typename weight_t>
-void causal_conv1d_bwd_cuda(ConvParamsBwd &params, cudaStream_t stream);
+void causal_conv1d_bwd_cuda(ConvParamsBwd &params, hipStream_t stream);
 template<typename input_t, typename weight_t>
-void causal_conv1d_channellast_bwd_cuda(ConvParamsBwd &params, cudaStream_t stream);
+void causal_conv1d_channellast_bwd_cuda(ConvParamsBwd &params, hipStream_t stream);
 
 template<typename input_t, typename weight_t>
-void causal_conv1d_update_cuda(ConvParamsBase &params, cudaStream_t stream);
+void causal_conv1d_update_cuda(ConvParamsBase &params, hipStream_t stream);
 
 void set_conv_params_fwd(ConvParamsBase &params,
                          // sizes
@@ -222,8 +223,8 @@ causal_conv1d_fwd(const at::Tensor &x, const at::Tensor &weight,
 
     // Otherwise the kernel will be launched from cuda:0 device
     // Cast to char to avoid compiler warning about narrowing
-    at::cuda::CUDAGuard device_guard{(char)x.get_device()};
-    auto stream = at::cuda::getCurrentCUDAStream().stream();
+    at::hip::HIPGuard device_guard{(char)x.get_device()};
+    auto stream = at::hip::getCurrentHIPStream().stream();
     DISPATCH_ITYPE_FLOAT_AND_HALF_AND_BF16(x.scalar_type(), "causal_conv1d_fwd", [&] {
         DISPATCH_WTYPE_FLOAT_AND_HALF_AND_BF16(weight.scalar_type(), "causal_conv1d_fwd", [&] {
             if (!is_channel_last) {
@@ -309,7 +310,7 @@ causal_conv1d_bwd(const at::Tensor &x, const at::Tensor &weight,
 
     // Otherwise the kernel will be launched from cuda:0 device
     // Cast to char to avoid compiler warning about narrowing
-    at::cuda::CUDAGuard device_guard{(char)x.get_device()};
+    at::hip::HIPGuard device_guard{(char)x.get_device()};
 
     at::Tensor dweight = torch::zeros_like(weight, weight.options().dtype(at::kFloat));
     at::Tensor dbias;
@@ -368,7 +369,7 @@ causal_conv1d_bwd(const at::Tensor &x, const at::Tensor &weight,
         params.dinitial_states_ptr = nullptr;
     }
 
-    auto stream = at::cuda::getCurrentCUDAStream().stream();
+    auto stream = at::hip::getCurrentHIPStream().stream();
     DISPATCH_ITYPE_FLOAT_AND_HALF_AND_BF16(x.scalar_type(), "causal_conv1d_bwd", [&] {
         DISPATCH_WTYPE_FLOAT_AND_HALF_AND_BF16(weight.scalar_type(), "causal_conv1d_bwd", [&] {
             if (!is_channel_last) {
@@ -430,8 +431,8 @@ causal_conv1d_update(const at::Tensor &x,
 
     // Otherwise the kernel will be launched from cuda:0 device
     // Cast to char to avoid compiler warning about narrowing
-    at::cuda::CUDAGuard device_guard{(char)x.get_device()};
-    auto stream = at::cuda::getCurrentCUDAStream().stream();
+    at::hip::HIPGuard device_guard{(char)x.get_device()};
+    auto stream = at::hip::getCurrentHIPStream().stream();
     DISPATCH_ITYPE_FLOAT_AND_HALF_AND_BF16(x.scalar_type(), "causal_conv1d_update", [&] {
         DISPATCH_WTYPE_FLOAT_AND_HALF_AND_BF16(weight.scalar_type(), "causal_conv1d_update", [&] {
             causal_conv1d_update_cuda<input_t, weight_t>(params, stream);

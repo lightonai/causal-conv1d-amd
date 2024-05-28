@@ -1,14 +1,14 @@
 /******************************************************************************
  * Copyright (c) 2024, Tri Dao.
  ******************************************************************************/
+#include <hip/hip_runtime.h>
 
 #include <c10/util/BFloat16.h>
 #include <c10/util/Half.h>
-#include <c10/cuda/CUDAException.h>  // For C10_CUDA_CHECK and C10_CUDA_KERNEL_LAUNCH_CHECK
+#include <c10/hip/HIPException.h>  // For C10_HIP_CHECK and C10_HIP_KERNEL_LAUNCH_CHECK
+#include <ATen/cuda/Atomic.cuh> 
 
-#include <cub/block/block_load.cuh>
-#include <cub/block/block_store.cuh>
-#include <cub/block/block_reduce.cuh>
+#include <hipcub/hipcub.hpp>
 
 #include "causal_conv1d.h"
 #include "causal_conv1d_common.h"
@@ -30,17 +30,17 @@ struct Causal_conv1d_bwd_kernel_traits {
     static constexpr int kNExchangeRounds = sizeof(float) / sizeof(input_t);
     static constexpr bool kIsVecLoad = kIsVecLoad_;
     using vec_t = typename BytesToType<kNBytes * kNElts>::Type;
-    using BlockLoadT = cub::BlockLoad<input_t, kNThreads, kNElts, cub::BLOCK_LOAD_WARP_TRANSPOSE>;
-    using BlockLoadVecT = cub::BlockLoad<vec_t, kNThreads, 1, cub::BLOCK_LOAD_DIRECT>;
-    using BlockStoreT = cub::BlockStore<input_t, kNThreads, kNElts, cub::BLOCK_STORE_WARP_TRANSPOSE>;
-    using BlockStoreVecT = cub::BlockStore<vec_t, kNThreads, 1, cub::BLOCK_STORE_DIRECT>;
-    using BlockReduceFloatT = cub::BlockReduce<float, kNThreads>;
+    using BlockLoadT = hipcub::BlockLoad<input_t, kNThreads, kNElts, hipcub::BLOCK_LOAD_WARP_TRANSPOSE>;
+    using BlockLoadVecT = hipcub::BlockLoad<vec_t, kNThreads, 1, hipcub::BLOCK_LOAD_DIRECT>;
+    using BlockStoreT = hipcub::BlockStore<input_t, kNThreads, kNElts, hipcub::BLOCK_STORE_WARP_TRANSPOSE>;
+    using BlockStoreVecT = hipcub::BlockStore<vec_t, kNThreads, 1, hipcub::BLOCK_STORE_DIRECT>;
+    using BlockReduceFloatT = hipcub::BlockReduce<float, kNThreads>;
     static constexpr int kSmemIOSize = kIsVecLoad
         ? 0
-        : std::max({sizeof(typename BlockLoadT::TempStorage), sizeof(typename BlockStoreT::TempStorage)});
+        : std_::max(sizeof(typename BlockLoadT::TempStorage), sizeof(typename BlockStoreT::TempStorage));
     static constexpr int kSmemExchangeSize = kNThreads * kNBytes * kNElts * (!kSiluAct ? 1 : kNExchangeRounds + 1);
-    static constexpr int kSmemSize = std::max({kSmemExchangeSize,
-            int(sizeof(typename BlockReduceFloatT::TempStorage))}) + (kIsVecLoad ? 0 : kSmemIOSize);
+    static constexpr int kSmemSize = std_::max(kSmemExchangeSize,
+            int(sizeof(typename BlockReduceFloatT::TempStorage))) + (kIsVecLoad ? 0 : kSmemIOSize);
 };
 
 template<typename Ktraits>
@@ -109,13 +109,13 @@ void causal_conv1d_bwd_kernel(ConvParamsBwd params) {
         input_t x_vals_load[2 * kNElts] = {0};
         input_t dout_vals_load[2 * kNElts] = {0};
         if constexpr(kIsVecLoad) {
-            Ktraits::BlockLoadVecT(smem_load_vec).Load(reinterpret_cast<vec_t*>(x), *reinterpret_cast<vec_t (*)[1]>(&x_vals_load[kNElts]), (params.seqlen - chunk * kChunkSize) / kNElts);
-            Ktraits::BlockLoadVecT(smem_load_vec).Load(reinterpret_cast<vec_t*>(dout), *reinterpret_cast<vec_t (*)[1]>(&dout_vals_load[0]), (params.seqlen - chunk * kChunkSize) / kNElts);
+            typename Ktraits::BlockLoadVecT(smem_load_vec).Load(reinterpret_cast<vec_t*>(x), *reinterpret_cast<vec_t (*)[1]>(&x_vals_load[kNElts]), (params.seqlen - chunk * kChunkSize) / kNElts);
+            typename Ktraits::BlockLoadVecT(smem_load_vec).Load(reinterpret_cast<vec_t*>(dout), *reinterpret_cast<vec_t (*)[1]>(&dout_vals_load[0]), (params.seqlen - chunk * kChunkSize) / kNElts);
         } else {
             __syncthreads();
-            Ktraits::BlockLoadT(smem_load).Load(x, *reinterpret_cast<input_t (*)[kNElts]>(&x_vals_load[kNElts]), params.seqlen - chunk * kChunkSize);
+            typename Ktraits::BlockLoadT(smem_load).Load(x, *reinterpret_cast<input_t (*)[kNElts]>(&x_vals_load[kNElts]), params.seqlen - chunk * kChunkSize);
             __syncthreads();
-            Ktraits::BlockLoadT(smem_load).Load(dout, *reinterpret_cast<input_t (*)[kNElts]>(&dout_vals_load[0]), params.seqlen - chunk * kChunkSize);
+            typename Ktraits::BlockLoadT(smem_load).Load(dout, *reinterpret_cast<input_t (*)[kNElts]>(&dout_vals_load[0]), params.seqlen - chunk * kChunkSize);
         }
         float dout_vals[2 * kNElts], x_vals[2 * kNElts];
         if constexpr (!kSiluAct) {
@@ -207,9 +207,9 @@ void causal_conv1d_bwd_kernel(ConvParamsBwd params) {
         #pragma unroll
         for (int i = 0; i < kNElts; ++i) { dx_vals_store[i] = dx_vals[i]; }
         if constexpr(kIsVecLoad) {
-            Ktraits::BlockStoreVecT(smem_store_vec).Store(reinterpret_cast<vec_t*>(dx), reinterpret_cast<vec_t (&)[1]>(dx_vals_store), (params.seqlen - chunk * kChunkSize) / kNElts);
+            typename Ktraits::BlockStoreVecT(smem_store_vec).Store(reinterpret_cast<vec_t*>(dx), reinterpret_cast<vec_t (&)[1]>(dx_vals_store), (params.seqlen - chunk * kChunkSize) / kNElts);
         } else {
-            Ktraits::BlockStoreT(smem_store).Store(dx, dx_vals_store, params.seqlen - chunk * kChunkSize);
+            typename Ktraits::BlockStoreT(smem_store).Store(dx, dx_vals_store, params.seqlen - chunk * kChunkSize);
         }
         dx -= kChunkSize;
 
@@ -225,22 +225,22 @@ void causal_conv1d_bwd_kernel(ConvParamsBwd params) {
     #pragma unroll
     for (int w = 0; w < kWidth; ++w) {
         __syncthreads();
-        dweight_vals[w] = Ktraits::BlockReduceFloatT(smem_reduce_float).Sum(dweight_vals[w]);
+        dweight_vals[w] = typename Ktraits::BlockReduceFloatT(smem_reduce_float).Sum(dweight_vals[w]);
         if (tidx == 0) {
-            atomicAdd(&reinterpret_cast<float *>(dweight)[w * params.dweight_width_stride], dweight_vals[w]);
+            gpuAtomicAddNoReturn(&reinterpret_cast<float *>(dweight)[w * params.dweight_width_stride], dweight_vals[w]);
         }
     }
     if (params.bias_ptr != nullptr) {
         __syncthreads();
-        dbias_val = Ktraits::BlockReduceFloatT(smem_reduce_float).Sum(dbias_val);
+        dbias_val = typename Ktraits::BlockReduceFloatT(smem_reduce_float).Sum(dbias_val);
         if (tidx == 0) {
-            atomicAdd(&reinterpret_cast<float *>(params.dbias_ptr)[dim_id], dbias_val);
+            gpuAtomicAddNoReturn(&reinterpret_cast<float *>(params.dbias_ptr)[dim_id], dbias_val);
         }
     }
 }
 
 template<int kNThreads, int kWidth, typename input_t, typename weight_t>
-void causal_conv1d_bwd_launch(ConvParamsBwd &params, cudaStream_t stream) {
+void causal_conv1d_bwd_launch(ConvParamsBwd &params, hipStream_t stream) {
     static constexpr int kNElts = sizeof(input_t) == 4 ? 4 : 8;
     BOOL_SWITCH(params.seqlen % kNElts == 0, kIsVecLoad, [&] {
         BOOL_SWITCH(params.silu_activation, kSiluAct, [&] {
@@ -249,17 +249,17 @@ void causal_conv1d_bwd_launch(ConvParamsBwd &params, cudaStream_t stream) {
             dim3 grid(params.batch, params.dim);
             auto kernel = &causal_conv1d_bwd_kernel<Ktraits>;
             if (kSmemSize >= 48 * 1024) {
-                C10_CUDA_CHECK(cudaFuncSetAttribute(
-                    kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, kSmemSize));
+                C10_HIP_CHECK(hipFuncSetAttribute(
+                    (const void *)kernel, hipFuncAttributeMaxDynamicSharedMemorySize, kSmemSize));
                 }
             kernel<<<grid, Ktraits::kNThreads, kSmemSize, stream>>>(params);
-            C10_CUDA_KERNEL_LAUNCH_CHECK();
+            C10_HIP_KERNEL_LAUNCH_CHECK();
         });
     });
 }
 
 template<typename input_t, typename weight_t>
-void causal_conv1d_bwd_cuda(ConvParamsBwd &params, cudaStream_t stream) {
+void causal_conv1d_bwd_cuda(ConvParamsBwd &params, hipStream_t stream) {
     if (params.width == 2) {
         causal_conv1d_bwd_launch<128, 2, input_t, weight_t>(params, stream);
     } else if (params.width == 3) {
@@ -279,8 +279,9 @@ struct Causal_conv1d_channellast_bwd_kernel_traits {
     using weight_t = weight_t_;
     static constexpr bool kSiluAct = kSiluAct_;
     static constexpr int kNThreads = kNThreads_;
-    static_assert(kNThreads % 32 == 0);
-    static constexpr int kNWarps = kNThreads / 32;
+    static constexpr int warpSize_ = 64;
+    static_assert(kNThreads % warpSize_ == 0);
+    static constexpr int kNWarps = kNThreads / warpSize_;
     static constexpr int kWidth = kWidth_;
     static constexpr int kChunkSizeL = kChunkSizeL_;
     static constexpr int kNBytes = sizeof(input_t);
@@ -289,15 +290,15 @@ struct Causal_conv1d_channellast_bwd_kernel_traits {
     static constexpr int kNEltsPerRow = 128 / kNBytes;
     static constexpr int kNThreadsPerRow = kNEltsPerRow / kNElts;  // Always 8 for now
     static_assert(kNThreadsPerRow * kNBytes * kNElts == 128);
-    static constexpr int kNColsPerWarp = 32 / kNThreadsPerRow;  // Always 4 for now
-    static_assert(kNColsPerWarp * kNThreadsPerRow == 32);
+    static constexpr int kNColsPerWarp = warpSize_ / kNThreadsPerRow;  // Always 4 for now
+    static_assert(kNColsPerWarp * kNThreadsPerRow == warpSize_);
     static constexpr int kNColsPerLoad = kNColsPerWarp * kNWarps;
     static constexpr int kNLoads = kChunkSizeL / kNColsPerLoad;
     static_assert(kNLoads * kNColsPerLoad == kChunkSizeL);
     static constexpr bool kIsVecLoad = kIsVecLoad_;
     using vec_t = typename BytesToType<kNBytes * kNElts>::Type;
-    // using BlockLoadT = cub::BlockLoad<input_t, kNThreads, kNItems, cub::BLOCK_LOAD_WARP_TRANSPOSE>;
-    // using BlockStoreT = cub::BlockStore<input_t, kNThreads, kNItems, cub::BLOCK_STORE_WARP_TRANSPOSE>;
+    // using BlockLoadT = hipcub::BlockLoad<input_t, kNThreads, kNItems, hipcub::BLOCK_LOAD_WARP_TRANSPOSE>;
+    // using BlockStoreT = hipcub::BlockStore<input_t, kNThreads, kNItems, hipcub::BLOCK_STORE_WARP_TRANSPOSE>;
     // static constexpr int kSmemSize = std::max({sizeof(typename BlockLoadT::TempStorage),
     //                                            sizeof(typename BlockStoreT::TempStorage)});
     // static constexpr int kSmemSize = kChunkSizeL * kNEltsPerRow * kNBytes;
@@ -394,7 +395,7 @@ void causal_conv1d_channellast_bwd_kernel(ConvParamsBwd params) {
 
     __syncthreads();
 
-    constexpr int kLPerThread = std::min(kChunkSizeL * kChunkSizeC / kNThreads, kChunkSizeL);
+    constexpr int kLPerThread = std_::min(kChunkSizeL * kChunkSizeC / kNThreads, kChunkSizeL);
     static_assert(kLPerThread * kNThreads == kChunkSizeL * kChunkSizeC);
     constexpr int kNThreadsPerRow = kChunkSizeL / kLPerThread;
     static_assert(kNThreadsPerRow * kLPerThread == kChunkSizeL);
@@ -468,7 +469,7 @@ void causal_conv1d_channellast_bwd_kernel(ConvParamsBwd params) {
         }
         dweight_vals[w] = Allreduce<kNThreadsPerRow>::run(dweight_vals[w], sum_op);
         if (col_idx == 0 && chunk_c_id * kChunkSizeC + row_idx < params.dim) {
-            atomicAdd(&reinterpret_cast<float *>(dweight)[row_idx * params.dweight_c_stride + w * params.dweight_width_stride], dweight_vals[w]);
+            gpuAtomicAddNoReturn(&reinterpret_cast<float *>(dweight)[row_idx * params.dweight_c_stride + w * params.dweight_width_stride], dweight_vals[w]);
         }
     }
 
@@ -477,7 +478,7 @@ void causal_conv1d_channellast_bwd_kernel(ConvParamsBwd params) {
         for (int i = 0; i < kLPerThread; ++i) { dbias_val += dout_vals[i]; }
         dbias_val = Allreduce<kNThreadsPerRow>::run(dbias_val, sum_op);
         if (col_idx == 0 && chunk_c_id * kChunkSizeC + row_idx < params.dim) {
-            atomicAdd(&reinterpret_cast<float *>(params.dbias_ptr)[chunk_c_id * kChunkSizeC + row_idx], dbias_val);
+            gpuAtomicAddNoReturn(&reinterpret_cast<float *>(params.dbias_ptr)[chunk_c_id * kChunkSizeC + row_idx], dbias_val);
         }
     }
 
@@ -551,7 +552,7 @@ void causal_conv1d_channellast_bwd_kernel(ConvParamsBwd params) {
 }
 
 template<int kNThreads, int kWidth, typename input_t, typename weight_t>
-void causal_conv1d_channellast_bwd_launch(ConvParamsBwd &params, cudaStream_t stream) {
+void causal_conv1d_channellast_bwd_launch(ConvParamsBwd &params, hipStream_t stream) {
     BOOL_SWITCH(params.silu_activation, kSiluAct, [&] {
         BOOL_SWITCH(params.seq_idx_ptr != nullptr, kHasSeqIdx, [&] {
             BOOL_SWITCH(params.dfinal_states_ptr != nullptr, kHasDfinalStates, [&] {
@@ -568,12 +569,12 @@ void causal_conv1d_channellast_bwd_launch(ConvParamsBwd &params, cudaStream_t st
                     dim3 block(Ktraits::kNThreads);
                     auto kernel = &causal_conv1d_channellast_bwd_kernel<Ktraits, kHasSeqIdx, kHasDfinalStates>;
                     // if (kSmemSize >= 48 * 1024) {
-                    //     C10_CUDA_CHECK(cudaFuncSetAttribute(
-                    //         kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, kSmemSize));
+                    //     C10_HIP_CHECK(hipFuncSetAttribute(
+                    //         kernel, hipFuncAttributeMaxDynamicSharedMemorySize, kSmemSize));
                     //     }
                     // kernel<<<grid, Ktraits::kNThreads, kSmemSize, stream>>>(params);
                     kernel<<<grid, Ktraits::kNThreads, 0, stream>>>(params);
-                    C10_CUDA_KERNEL_LAUNCH_CHECK();
+                    C10_HIP_KERNEL_LAUNCH_CHECK();
                 });
             });
         });
@@ -581,7 +582,7 @@ void causal_conv1d_channellast_bwd_launch(ConvParamsBwd &params, cudaStream_t st
 }
 
 template<typename input_t, typename weight_t>
-void causal_conv1d_channellast_bwd_cuda(ConvParamsBwd &params, cudaStream_t stream) {
+void causal_conv1d_channellast_bwd_cuda(ConvParamsBwd &params, hipStream_t stream) {
     if (params.width == 2) {
         causal_conv1d_channellast_bwd_launch<128, 2, input_t, weight_t>(params, stream);
     } else if (params.width == 3) {
@@ -591,22 +592,22 @@ void causal_conv1d_channellast_bwd_cuda(ConvParamsBwd &params, cudaStream_t stre
     }
 }
 
-template void causal_conv1d_bwd_cuda<float, float>(ConvParamsBwd &params, cudaStream_t stream);
-template void causal_conv1d_bwd_cuda<at::Half, float>(ConvParamsBwd &params, cudaStream_t stream);
-template void causal_conv1d_bwd_cuda<at::BFloat16, float>(ConvParamsBwd &params, cudaStream_t stream);
-template void causal_conv1d_bwd_cuda<float, at::Half>(ConvParamsBwd &params, cudaStream_t stream);
-template void causal_conv1d_bwd_cuda<at::Half, at::Half>(ConvParamsBwd &params, cudaStream_t stream);
-template void causal_conv1d_bwd_cuda<at::BFloat16, at::Half>(ConvParamsBwd &params, cudaStream_t stream);
-template void causal_conv1d_bwd_cuda<float, at::BFloat16>(ConvParamsBwd &params, cudaStream_t stream);
-template void causal_conv1d_bwd_cuda<at::Half, at::BFloat16>(ConvParamsBwd &params, cudaStream_t stream);
-template void causal_conv1d_bwd_cuda<at::BFloat16, at::BFloat16>(ConvParamsBwd &params, cudaStream_t stream);
+template void causal_conv1d_bwd_cuda<float, float>(ConvParamsBwd &params, hipStream_t stream);
+template void causal_conv1d_bwd_cuda<at::Half, float>(ConvParamsBwd &params, hipStream_t stream);
+template void causal_conv1d_bwd_cuda<at::BFloat16, float>(ConvParamsBwd &params, hipStream_t stream);
+template void causal_conv1d_bwd_cuda<float, at::Half>(ConvParamsBwd &params, hipStream_t stream);
+template void causal_conv1d_bwd_cuda<at::Half, at::Half>(ConvParamsBwd &params, hipStream_t stream);
+template void causal_conv1d_bwd_cuda<at::BFloat16, at::Half>(ConvParamsBwd &params, hipStream_t stream);
+template void causal_conv1d_bwd_cuda<float, at::BFloat16>(ConvParamsBwd &params, hipStream_t stream);
+template void causal_conv1d_bwd_cuda<at::Half, at::BFloat16>(ConvParamsBwd &params, hipStream_t stream);
+template void causal_conv1d_bwd_cuda<at::BFloat16, at::BFloat16>(ConvParamsBwd &params, hipStream_t stream);
 
-template void causal_conv1d_channellast_bwd_cuda<float, float>(ConvParamsBwd &params, cudaStream_t stream);
-template void causal_conv1d_channellast_bwd_cuda<at::Half, float>(ConvParamsBwd &params, cudaStream_t stream);
-template void causal_conv1d_channellast_bwd_cuda<at::BFloat16, float>(ConvParamsBwd &params, cudaStream_t stream);
-template void causal_conv1d_channellast_bwd_cuda<float, at::Half>(ConvParamsBwd &params, cudaStream_t stream);
-template void causal_conv1d_channellast_bwd_cuda<at::Half, at::Half>(ConvParamsBwd &params, cudaStream_t stream);
-template void causal_conv1d_channellast_bwd_cuda<at::BFloat16, at::Half>(ConvParamsBwd &params, cudaStream_t stream);
-template void causal_conv1d_channellast_bwd_cuda<float, at::BFloat16>(ConvParamsBwd &params, cudaStream_t stream);
-template void causal_conv1d_channellast_bwd_cuda<at::Half, at::BFloat16>(ConvParamsBwd &params, cudaStream_t stream);
-template void causal_conv1d_channellast_bwd_cuda<at::BFloat16, at::BFloat16>(ConvParamsBwd &params, cudaStream_t stream);
+template void causal_conv1d_channellast_bwd_cuda<float, float>(ConvParamsBwd &params, hipStream_t stream);
+template void causal_conv1d_channellast_bwd_cuda<at::Half, float>(ConvParamsBwd &params, hipStream_t stream);
+template void causal_conv1d_channellast_bwd_cuda<at::BFloat16, float>(ConvParamsBwd &params, hipStream_t stream);
+template void causal_conv1d_channellast_bwd_cuda<float, at::Half>(ConvParamsBwd &params, hipStream_t stream);
+template void causal_conv1d_channellast_bwd_cuda<at::Half, at::Half>(ConvParamsBwd &params, hipStream_t stream);
+template void causal_conv1d_channellast_bwd_cuda<at::BFloat16, at::Half>(ConvParamsBwd &params, hipStream_t stream);
+template void causal_conv1d_channellast_bwd_cuda<float, at::BFloat16>(ConvParamsBwd &params, hipStream_t stream);
+template void causal_conv1d_channellast_bwd_cuda<at::Half, at::BFloat16>(ConvParamsBwd &params, hipStream_t stream);
+template void causal_conv1d_channellast_bwd_cuda<at::BFloat16, at::BFloat16>(ConvParamsBwd &params, hipStream_t stream);
