@@ -4,6 +4,15 @@ Features:
 - Support fp32, fp16, bf16.
 - Kernel size 2, 3, 4.
 
+## Installation
+This port is set up to run efficiently on AMD. It does not retain support for Nvidia.
+It can be installed with 
+
+```pip install .```
+
+## Requirements
+- ROCM 6.0+
+
 ## How to use
 
 ```
